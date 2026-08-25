@@ -1,6 +1,4 @@
 import io
-import os
-import sqlite3
 from datetime import date
 
 import pandas as pd
@@ -8,10 +6,7 @@ import plotly.express as px
 import streamlit as st
 
 import ssb_index
-
-# Absolutt sti: databasen ligger alltid ved siden av denne filen,
-# uansett hvilken mappe du står i når du kjører "streamlit run" fra.
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prices.db")
+import turso_db as db
 
 # Kolonner i limt Excel-data: år og prosjekt id skrives inn manuelt én gang
 # (se "Legg til data"-fanen) og gjelder for alle limte rader, så de er IKKE
@@ -19,31 +14,7 @@ DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prices.db")
 EXPECTED_COLUMNS = ["kostkode", "kostkode_tekst", "enhet", "enh_pris"]
 
 
-def get_conn():
-    return sqlite3.connect(DB_PATH)
-
-
-def init_db():
-    conn = get_conn()
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS prices (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            kostkode TEXT NOT NULL,
-            kostkode_tekst TEXT,
-            enhet TEXT,
-            enh_pris REAL NOT NULL,
-            aar INTEGER NOT NULL,
-            prosjekt_id TEXT NOT NULL,
-            UNIQUE(kostkode, prosjekt_id, aar)
-        )
-        """
-    )
-    conn.commit()
-    conn.close()
-
-
-init_db()
+db.init_db()
 
 st.set_page_config(page_title="Price Tracker", layout="wide")
 st.title("Price Tracker")
@@ -72,24 +43,22 @@ with tab_add:
         if not kostkode.strip() or not prosjekt_id.strip():
             st.error("Kostkode og Prosjekt id må fylles ut.")
         else:
-            conn = get_conn()
-            try:
-                conn.execute(
-                    """
-                    INSERT INTO prices (kostkode, kostkode_tekst, enhet, enh_pris, aar, prosjekt_id)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (kostkode.strip(), kostkode_tekst.strip(), enhet.strip(), enh_pris, int(aar), prosjekt_id.strip()),
-                )
-                conn.commit()
+            ok, er_duplikat, feilmelding = db.insert_single(
+                """
+                INSERT INTO prices (kostkode, kostkode_tekst, enhet, enh_pris, aar, prosjekt_id)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (kostkode.strip(), kostkode_tekst.strip(), enhet.strip(), enh_pris, int(aar), prosjekt_id.strip()),
+            )
+            if ok:
                 st.success(f"La til {kostkode} (prosjekt {prosjekt_id}, {int(aar)}).")
-            except sqlite3.IntegrityError:
+            elif er_duplikat:
                 st.error(
                     f"Denne kombinasjonen finnes allerede: kostkode '{kostkode}', "
                     f"prosjekt '{prosjekt_id}', år {int(aar)}. Ikke lagt til på nytt."
                 )
-            finally:
-                conn.close()
+            else:
+                st.error(f"Klarte ikke å legge til raden: {feilmelding}")
 
     st.divider()
 
@@ -168,25 +137,18 @@ with tab_add:
 
                 pasted_df["aar"] = pasted_df["aar"].astype(int)
 
-                conn = get_conn()
-                cur = conn.cursor()
-                inserted = 0
-                duplicates = 0
-                for row in pasted_df.itertuples(index=False):
-                    cur.execute(
-                        """
-                        INSERT OR IGNORE INTO prices
-                        (kostkode, kostkode_tekst, enhet, enh_pris, aar, prosjekt_id)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                        """,
-                        (row.kostkode, row.kostkode_tekst, row.enhet, row.enh_pris, row.aar, row.prosjekt_id),
-                    )
-                    if cur.rowcount:
-                        inserted += 1
-                    else:
-                        duplicates += 1
-                conn.commit()
-                conn.close()
+                args_list = [
+                    (row.kostkode, row.kostkode_tekst, row.enhet, row.enh_pris, row.aar, row.prosjekt_id)
+                    for row in pasted_df.itertuples(index=False)
+                ]
+                inserted, duplicates = db.insert_many_ignore_duplicates(
+                    """
+                    INSERT OR IGNORE INTO prices
+                    (kostkode, kostkode_tekst, enhet, enh_pris, aar, prosjekt_id)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    args_list,
+                )
 
                 msg = f"La til {inserted} rader."
                 if duplicates:
@@ -203,16 +165,13 @@ with tab_add:
 with tab_data:
     st.subheader("Alle oppføringer")
 
-    conn = get_conn()
-    df_all = pd.read_sql_query(
+    df_all = db.query_df(
         """
         SELECT id, kostkode, kostkode_tekst, enhet, enh_pris, aar, prosjekt_id
         FROM prices
         ORDER BY kostkode, aar DESC
-        """,
-        conn,
+        """
     )
-    conn.close()
 
     if df_all.empty:
         st.info("Ingen data registrert ennå.")
@@ -234,11 +193,8 @@ with tab_data:
             valgte_ider = df_all.iloc[valgte_rader]["id"].tolist()
             st.warning(f"{len(valgte_ider)} rad(er) valgt for sletting (id: {', '.join(map(str, valgte_ider))}).")
             if st.button("🗑️ Slett valgte rader", type="primary"):
-                conn = get_conn()
-                conn.executemany("DELETE FROM prices WHERE id = ?", [(i,) for i in valgte_ider])
-                conn.commit()
-                conn.close()
-                st.success(f"Slettet {len(valgte_ider)} rad(er).")
+                antall_slettet = db.delete_by_ids(valgte_ider)
+                st.success(f"Slettet {antall_slettet} rad(er).")
                 st.rerun()
 
 # ============================================================
@@ -247,27 +203,22 @@ with tab_data:
 with tab_analysis:
     st.subheader("Prisutvikling per kostkode")
 
-    conn = get_conn()
-    kostkoder = pd.read_sql_query(
-        "SELECT DISTINCT kostkode FROM prices ORDER BY kostkode", conn
-    )["kostkode"].tolist()
+    kostkoder = db.query_df("SELECT DISTINCT kostkode FROM prices ORDER BY kostkode")["kostkode"].tolist()
 
     if not kostkoder:
         st.info("Ingen data registrert ennå.")
     else:
         selected_kode = st.selectbox("Velg kostkode", kostkoder)
 
-        df_kode = pd.read_sql_query(
+        df_kode = db.query_df(
             """
             SELECT kostkode_tekst, enhet, enh_pris, aar, prosjekt_id
             FROM prices
             WHERE kostkode = ?
             ORDER BY aar
             """,
-            conn,
-            params=(selected_kode,),
+            (selected_kode,),
         )
-        conn.close()
 
         # Årlig gjennomsnitt på tvers av prosjekter
         yearly = (
