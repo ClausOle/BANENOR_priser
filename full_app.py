@@ -13,10 +13,35 @@ import turso_db as db
 # med i selve den limte teksten.
 EXPECTED_COLUMNS = ["kostkode", "kostkode_tekst", "enhet", "enh_pris"]
 
+st.set_page_config(page_title="Price Tracker", layout="wide")
+
+
+def sjekk_passord():
+    """
+    Enkel felles passordsperre foran hele appen (ikke individuelle
+    brukerkontoer — passer for en liten intern gruppe). Passordet leses
+    fra st.secrets, aldri hardkodet. Returnerer True først når riktig
+    passord er skrevet inn, og husker det for resten av økten.
+    """
+    if st.session_state.get("autentisert", False):
+        return True
+
+    st.title("Price Tracker")
+    passord = st.text_input("Passord", type="password")
+    if st.button("Logg inn"):
+        if passord == st.secrets["app"]["passord"]:
+            st.session_state["autentisert"] = True
+            st.rerun()
+        else:
+            st.error("Feil passord.")
+    return False
+
+
+if not sjekk_passord():
+    st.stop()
 
 db.init_db()
 
-st.set_page_config(page_title="Price Tracker", layout="wide")
 st.title("Price Tracker")
 
 tab_add, tab_data, tab_analysis = st.tabs(["Legg til data", "Alle oppføringer", "Analyse"])
