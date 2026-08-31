@@ -5,13 +5,9 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+import excel_import
 import ssb_index
 import turso_db as db
-
-# Kolonner i limt Excel-data: år og prosjekt id skrives inn manuelt én gang
-# (se "Legg til data"-fanen) og gjelder for alle limte rader, så de er IKKE
-# med i selve den limte teksten.
-EXPECTED_COLUMNS = ["kostkode", "kostkode_tekst", "enhet", "enh_pris"]
 
 st.set_page_config(page_title="Price Tracker", layout="wide")
 
@@ -43,6 +39,11 @@ if not sjekk_passord():
 db.init_db()
 
 st.title("Price Tracker")
+
+with st.sidebar:
+    if st.button("Logg ut"):
+        st.session_state["autentisert"] = False
+        st.rerun()
 
 tab_add, tab_data, tab_analysis = st.tabs(["Legg til data", "Alle oppføringer", "Analyse"])
 
@@ -87,102 +88,71 @@ with tab_add:
 
     st.divider()
 
-    # --- Paste rows copied from Excel ---
-    st.subheader("Lim inn rader fra Excel")
+    # --- Last opp Excel-fil ---
+    st.subheader("Last opp Excel-fil")
     st.caption(
-        "År og Prosjekt id gjelder for ALLE radene du limer inn under. "
-        "Kolonnerekkefølge i selve den limte teksten: "
-        "Kostkode, Kostkode tekst, Enhet, Enh.pris (ingen header-rad)."
+        "Appen leter gjennom ALLE faner i fila etter rader som har Kostkode, "
+        "Kostkode tekst, Enhet og Enh.pris (uansett hvor i fila de ligger). "
+        "Faner uten denne strukturen hoppes automatisk over, og rader uten "
+        "Kostkode eller uten en tallverdi i Enh.pris droppes."
     )
 
     col_year, col_project = st.columns(2)
     with col_year:
-        paste_aar = st.number_input(
-            "År (gjelder alle limte rader)",
+        excel_aar = st.number_input(
+            "År (gjelder alle rader fra fila)",
             min_value=1990, max_value=2100, value=date.today().year, step=1,
-            key="paste_aar",
+            key="excel_aar",
         )
     with col_project:
-        paste_prosjekt_id = st.text_input("Prosjekt id (gjelder alle limte rader)", key="paste_prosjekt_id")
+        excel_prosjekt_id = st.text_input("Prosjekt id (gjelder alle rader fra fila)", key="excel_prosjekt_id")
 
-    pasted_text = st.text_area("Limt inn data", height=140)
-    paste_submitted = st.button("Legg til limte rader")
+    opplastet_fil = st.file_uploader("Excel-fil (.xlsx)", type=["xlsx"], key="excel_uploader")
 
-    if paste_submitted:
-        if not pasted_text.strip():
-            st.error("Ingenting limt inn.")
-        elif not paste_prosjekt_id.strip():
-            st.error("Prosjekt id må fylles ut før du legger til limte rader.")
+    if opplastet_fil is not None:
+        if not excel_prosjekt_id.strip():
+            st.error("Prosjekt id må fylles ut før fila kan leses.")
         else:
             try:
-                lines = [line for line in pasted_text.splitlines() if line.strip()]
-                n_expected = len(EXPECTED_COLUMNS)
-                bad_lines = [
-                    (i + 1, line) for i, line in enumerate(lines)
-                    if len(line.split("\t")) != n_expected
-                ]
-                if bad_lines:
-                    examples = "; ".join(f"linje {n}: {len(l.split(chr(9)))} felt" for n, l in bad_lines[:3])
-                    st.error(
-                        f"Forventet nøyaktig {n_expected} kolonner "
-                        f"(Kostkode, Kostkode tekst, Enhet, Enh.pris) per rad. "
-                        f"Fant rader med annet antall felt ({examples})."
-                    )
-                    st.stop()
-
-                pasted_df = pd.read_csv(
-                    io.StringIO(pasted_text),
-                    sep="\t",
-                    header=None,
-                    names=EXPECTED_COLUMNS,
-                    index_col=False,
-                    skip_blank_lines=True,
+                rader_df, fane_rapport = excel_import.les_excel(
+                    opplastet_fil, excel_aar, excel_prosjekt_id
                 )
-
-                for col in ["kostkode", "kostkode_tekst", "enhet"]:
-                    pasted_df[col] = pasted_df[col].astype(str).str.strip()
-
-                pasted_df["enh_pris"] = pd.to_numeric(
-                    pasted_df["enh_pris"].astype(str).str.replace(",", ".").str.strip(),
-                    errors="coerce",
-                )
-
-                # Aar og prosjekt_id kommer fra feltene over, samme for alle rader
-                pasted_df["aar"] = int(paste_aar)
-                pasted_df["prosjekt_id"] = paste_prosjekt_id.strip()
-
-                before_count = len(pasted_df)
-                pasted_df = pasted_df.replace("", pd.NA)
-                pasted_df = pasted_df.dropna(subset=["kostkode", "enh_pris"], how="any")
-                skipped_invalid = before_count - len(pasted_df)
-
-                if pasted_df.empty:
-                    st.error("Ingen gyldige rader funnet etter fjerning av tomme/ugyldige rader.")
-                    st.stop()
-
-                pasted_df["aar"] = pasted_df["aar"].astype(int)
-
-                args_list = [
-                    (row.kostkode, row.kostkode_tekst, row.enhet, row.enh_pris, row.aar, row.prosjekt_id)
-                    for row in pasted_df.itertuples(index=False)
-                ]
-                inserted, duplicates = db.insert_many_ignore_duplicates(
-                    """
-                    INSERT OR IGNORE INTO prices
-                    (kostkode, kostkode_tekst, enhet, enh_pris, aar, prosjekt_id)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    args_list,
-                )
-
-                msg = f"La til {inserted} rader."
-                if duplicates:
-                    msg += f" Hoppet over {duplicates} duplikat(er) (kostkode+prosjekt+år finnes allerede)."
-                if skipped_invalid:
-                    msg += f" Hoppet over {skipped_invalid} rad(er) med ugyldige/tomme felt."
-                st.success(msg)
             except Exception as e:
-                st.error(f"Klarte ikke å tolke innlimt tekst: {e}")
+                st.error(f"Klarte ikke å lese Excel-fila: {e}")
+                rader_df, fane_rapport = None, None
+
+            if fane_rapport is not None:
+                with st.expander(f"Faner i fila ({len(fane_rapport)}) — hva ble gjenkjent"):
+                    rapport_df = pd.DataFrame(fane_rapport, columns=["Fane", "Status", "Antall rader"])
+                    st.dataframe(rapport_df, width="stretch", hide_index=True)
+
+            if rader_df is not None and not rader_df.empty:
+                st.success(f"Fant {len(rader_df)} gyldige rader på tvers av fila. Sjekk gjennom før du importerer:")
+                st.dataframe(
+                    rader_df[["fane", "kostkode", "kostkode_tekst", "enhet", "enh_pris"]],
+                    width="stretch",
+                    hide_index=True,
+                )
+
+                if st.button("✅ Importer disse radene til databasen", type="primary"):
+                    args_list = [
+                        (row.kostkode, row.kostkode_tekst, row.enhet, row.enh_pris, row.aar, row.prosjekt_id)
+                        for row in rader_df.itertuples(index=False)
+                    ]
+                    inserted, duplicates = db.insert_many_ignore_duplicates(
+                        """
+                        INSERT OR IGNORE INTO prices
+                        (kostkode, kostkode_tekst, enhet, enh_pris, aar, prosjekt_id)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        args_list,
+                    )
+                    msg = f"La til {inserted} rader."
+                    if duplicates:
+                        msg += f" Hoppet over {duplicates} duplikat(er) (kostkode+prosjekt+år finnes allerede)."
+                    st.success(msg)
+            elif rader_df is not None:
+                st.warning("Fant ingen gyldige rader (med både Kostkode og Enh.pris) i noen av fanene.")
 
 # ============================================================
 # TAB: Alle oppføringer
