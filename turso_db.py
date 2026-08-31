@@ -65,41 +65,55 @@ def query_df(sql, args=()):
         client.close()
 
 
-def insert_single(sql, args):
+def insert_many_check_conflicts(rows):
     """
-    Kjører én INSERT. Returnerer (ok, er_duplikat, feilmelding).
-    er_duplikat er True hvis det var unik-constraint-bruddet som stoppet den.
-    """
-    client = _get_client()
-    try:
-        client.execute(sql, args)
-        return True, False, None
-    except libsql_client.LibsqlError as e:
-        if "UNIQUE constraint failed" in str(e):
-            return False, True, str(e)
-        return False, False, str(e)
-    finally:
-        client.close()
+    Setter inn rader med konflikt-sjekk, én om gangen over samme
+    tilkobling. rows: liste av
+    (kostkode, kostkode_tekst, enhet, enh_pris, aar, prosjekt_id).
 
+    For hver rad sjekkes det først om kostkode+prosjekt_id+aar finnes
+    fra før:
+      - Finnes ikke -> settes inn ("inserted").
+      - Finnes med SAMME enh_pris (innenfor øre-toleranse) -> ekte
+        duplikat, hoppes stille over ("duplicates").
+      - Finnes med ANNEN enh_pris -> settes IKKE inn (ville uansett
+        brutt unik-constraint), og legges i "conflicts" med både gammel
+        og ny pris, slik at det vises tydelig i stedet for å forsvinne.
 
-def insert_many_ignore_duplicates(sql, args_list):
-    """
-    Kjører en liste med "INSERT OR IGNORE"-setninger (én om gangen, over
-    samme tilkobling). Returnerer (antall_satt_inn, antall_duplikater).
-    Bruker rows_affected for å avgjøre om raden faktisk ble satt inn,
-    siden "OR IGNORE" ikke kaster feil ved duplikat.
+    Returnerer (inserted: int, duplicates: int, conflicts: list[dict]).
     """
     client = _get_client()
     inserted = 0
     duplicates = 0
+    conflicts = []
     try:
-        for args in args_list:
-            rs = client.execute(sql, args)
-            if rs.rows_affected:
+        for kostkode, kostkode_tekst, enhet, enh_pris, aar, prosjekt_id in rows:
+            rs = client.execute(
+                "SELECT enh_pris FROM prices WHERE kostkode = ? AND prosjekt_id = ? AND aar = ?",
+                (kostkode, prosjekt_id, aar),
+            )
+            if not rs.rows:
+                client.execute(
+                    """
+                    INSERT INTO prices (kostkode, kostkode_tekst, enhet, enh_pris, aar, prosjekt_id)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (kostkode, kostkode_tekst, enhet, enh_pris, aar, prosjekt_id),
+                )
                 inserted += 1
             else:
-                duplicates += 1
-        return inserted, duplicates
+                eksisterende_pris = rs.rows[0][0]
+                if abs(eksisterende_pris - enh_pris) < 0.005:
+                    duplicates += 1
+                else:
+                    conflicts.append({
+                        "kostkode": kostkode,
+                        "prosjekt_id": prosjekt_id,
+                        "aar": aar,
+                        "eksisterende_pris": eksisterende_pris,
+                        "ny_pris": enh_pris,
+                    })
+        return inserted, duplicates, conflicts
     finally:
         client.close()
 

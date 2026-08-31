@@ -69,22 +69,24 @@ with tab_add:
         if not kostkode.strip() or not prosjekt_id.strip():
             st.error("Kostkode og Prosjekt id må fylles ut.")
         else:
-            ok, er_duplikat, feilmelding = db.insert_single(
-                """
-                INSERT INTO prices (kostkode, kostkode_tekst, enhet, enh_pris, aar, prosjekt_id)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (kostkode.strip(), kostkode_tekst.strip(), enhet.strip(), enh_pris, int(aar), prosjekt_id.strip()),
-            )
-            if ok:
+            inserted, duplicates, conflicts = db.insert_many_check_conflicts([
+                (kostkode.strip(), kostkode_tekst.strip(), enhet.strip(), enh_pris, int(aar), prosjekt_id.strip())
+            ])
+            if inserted:
                 st.success(f"La til {kostkode} (prosjekt {prosjekt_id}, {int(aar)}).")
-            elif er_duplikat:
-                st.error(
-                    f"Denne kombinasjonen finnes allerede: kostkode '{kostkode}', "
+            elif duplicates:
+                st.info(
+                    f"Denne raden finnes allerede med samme pris: kostkode '{kostkode}', "
                     f"prosjekt '{prosjekt_id}', år {int(aar)}. Ikke lagt til på nytt."
                 )
-            else:
-                st.error(f"Klarte ikke å legge til raden: {feilmelding}")
+            elif conflicts:
+                c = conflicts[0]
+                st.error(
+                    f"Kostkode '{kostkode}' finnes allerede for prosjekt '{prosjekt_id}', år {int(aar)} — "
+                    f"men med en ANNEN pris ({c['eksisterende_pris']:,.2f} i databasen, du skrev inn "
+                    f"{c['ny_pris']:,.2f}). Raden er IKKE lagt til. Slett den gamle raden i "
+                    f"'Alle oppføringer' først hvis den nye prisen er riktig."
+                )
 
     st.divider()
 
@@ -139,18 +141,21 @@ with tab_add:
                         (row.kostkode, row.kostkode_tekst, row.enhet, row.enh_pris, row.aar, row.prosjekt_id)
                         for row in rader_df.itertuples(index=False)
                     ]
-                    inserted, duplicates = db.insert_many_ignore_duplicates(
-                        """
-                        INSERT OR IGNORE INTO prices
-                        (kostkode, kostkode_tekst, enhet, enh_pris, aar, prosjekt_id)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                        """,
-                        args_list,
-                    )
+                    inserted, duplicates, conflicts = db.insert_many_check_conflicts(args_list)
+
                     msg = f"La til {inserted} rader."
                     if duplicates:
-                        msg += f" Hoppet over {duplicates} duplikat(er) (kostkode+prosjekt+år finnes allerede)."
+                        msg += f" Hoppet over {duplicates} ekte duplikat(er) (samme kostkode+prosjekt+år+pris finnes allerede)."
                     st.success(msg)
+
+                    if conflicts:
+                        st.warning(
+                            f"⚠️ {len(conflicts)} rad(er) ble IKKE importert fordi kostkode+prosjekt+år "
+                            "allerede finnes i databasen, men med en ANNEN pris. Sjekk disse manuelt — "
+                            "trolig fordi flere faner i fila (f.eks. ulike varianter) dekker samme "
+                            "kostkode med ulik pris:"
+                        )
+                        st.dataframe(pd.DataFrame(conflicts), width="stretch", hide_index=True)
             elif rader_df is not None:
                 st.warning("Fant ingen gyldige rader (med både Kostkode og Enh.pris) i noen av fanene.")
 
