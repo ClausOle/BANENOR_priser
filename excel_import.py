@@ -2,22 +2,31 @@
 Leser en opplastet Excel-arbeidsbok og finner alle rader som følger det
 kjente kostnadsoppsettet (Kostkode / Kostkode tekst / Enhet / Enh.pris),
 uansett hvilken fane de ligger i eller hvor mange andre kolonner
-(Mengde, Delsum, Sum total, Merknader osv.) fanen har ved siden av.
+(Delsum, Sum total, Merknader osv.) fanen har ved siden av.
 
 Gjenkjenningen er strukturbasert, ikke navnebasert: en fane importeres
 hvis og bare hvis den har en rad som inneholder alle fire påkrevde
 kolonnenavn — sammendrag-/notat-faner uten denne strukturen hoppes
 automatisk over.
 
+"Mengde" er VALGFRI: hvis fanen har en Mengde-kolonne leses tallverdien
+inn (tomt eller ikke-tall -> mangler), ellers settes mengde til mangler
+for alle rader i fanen. Eldre filer uten Mengde importeres dermed
+fortsatt, og fanerapporten sier fra om Mengde ble funnet.
+
 En rad tas kun med hvis den har BÅDE en Kostkode og en tallverdi i
 Enh.pris — rader som bare er mellomtitler, tomme grupper, eller uten
 registrert pris ennå, droppes stille.
 """
 
+import numpy as np
 import pandas as pd
 
 REQUIRED_LABELS = ["Kostkode", "Kostkode tekst", "Enhet", "Enh.pris"]
+MENGDE_LABEL = "Mengde"
 MAKS_HEADER_SOK_RADER = 10
+
+UT_KOLONNER = ["kostkode", "kostkode_tekst", "enhet", "enh_pris", "mengde", "aar", "prosjekt_id", "fane"]
 
 
 def _finn_header_og_kolonner(df_raw):
@@ -41,9 +50,9 @@ def les_excel(fil, aar, prosjekt_id):
     """
     Leser hele arbeidsboken og returnerer (rader_df, fane_rapport):
 
-    - rader_df: DataFrame med kostkode, kostkode_tekst, enhet, enh_pris,
-      aar, prosjekt_id — én rad per gyldig kostnadsrad funnet i hele fila,
-      klar til forhåndsvisning/import.
+    - rader_df: DataFrame med kolonnene i UT_KOLONNER — én rad per gyldig
+      kostnadsrad funnet i hele fila, klar til forhåndsvisning/import.
+      mengde er NaN der fanen mangler Mengde-kolonne eller cellen er tom.
     - fane_rapport: liste av (fanenavn, status_tekst, antall_rader) for
       hver fane i fila, til bruk i en oversikt over hva som ble
       gjenkjent/hoppet over.
@@ -66,6 +75,13 @@ def les_excel(fil, aar, prosjekt_id):
         enhet = data.iloc[:, kolonner["Enhet"]]
         enh_pris = pd.to_numeric(data.iloc[:, kolonner["Enh.pris"]], errors="coerce")
 
+        if MENGDE_LABEL in kolonner:
+            mengde = pd.to_numeric(data.iloc[:, kolonner[MENGDE_LABEL]], errors="coerce")
+            mengde_status = "med Mengde"
+        else:
+            mengde = pd.Series(np.nan, index=data.index, dtype="float64")
+            mengde_status = "uten Mengde-kolonne"
+
         gyldig = kostkode.notna() & enh_pris.notna()
         n_gyldig = int(gyldig.sum())
 
@@ -74,20 +90,21 @@ def les_excel(fil, aar, prosjekt_id):
                 "kostkode": kostkode[gyldig].astype(str).str.strip(),
                 "kostkode_tekst": kostkode_tekst[gyldig].fillna("").astype(str).str.strip(),
                 "enhet": enhet[gyldig].fillna("").astype(str).str.strip(),
-                "enh_pris": enh_pris[gyldig],
+                "enh_pris": enh_pris[gyldig].astype(float),
+                "mengde": mengde[gyldig].astype(float),
                 "aar": int(aar),
                 "prosjekt_id": prosjekt_id.strip(),
                 "fane": sheet,
             })
             alle_rader.append(uttrekk)
 
-        fane_rapport.append((sheet, f"Gjenkjent (header i rad {header_idx + 1})", n_gyldig))
+        fane_rapport.append(
+            (sheet, f"Gjenkjent (header i rad {header_idx + 1}, {mengde_status})", n_gyldig)
+        )
 
     if alle_rader:
-        rader_df = pd.concat(alle_rader, ignore_index=True)
+        rader_df = pd.concat(alle_rader, ignore_index=True)[UT_KOLONNER]
     else:
-        rader_df = pd.DataFrame(
-            columns=["kostkode", "kostkode_tekst", "enhet", "enh_pris", "aar", "prosjekt_id", "fane"]
-        )
+        rader_df = pd.DataFrame(columns=UT_KOLONNER)
 
     return rader_df, fane_rapport
