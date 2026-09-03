@@ -258,7 +258,7 @@ with tab_analysis:
         med_mengde = df_kode[df_kode["mengde"].notna() & (df_kode["mengde"] > 0)]
 
         # ---------- Enh.pris mot mengde ----------
-        st.markdown("#### Enh.pris mot mengde")
+        st.markdown("#### Enh.pris mot mengde (mengde på x-aksen, boblestørrelse = mengde)")
         if med_mengde.empty:
             st.info(
                 "Ingen oppføringer for denne kostkoden har registrert mengde ennå. "
@@ -267,13 +267,13 @@ with tab_analysis:
         else:
             fig_m = px.scatter(
                 med_mengde,
-                x="enh_pris",
-                y="mengde",
+                x="mengde",
+                y="enh_pris",
                 size="mengde",
                 size_max=45,
                 color="aar_tekst",
                 hover_data={"prosjekt_id": True, "enhet": True, "aar_tekst": False, "aar": True},
-                labels={"enh_pris": "Enh.pris", "mengde": "Mengde", "aar_tekst": "År"},
+                labels={"mengde": "Mengde", "enh_pris": "Enh.pris", "aar_tekst": "År"},
                 title=f"Enh.pris mot mengde — {selected_kode}",
             )
             st.plotly_chart(fig_m, width="stretch")
